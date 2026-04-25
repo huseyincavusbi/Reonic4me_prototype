@@ -6,6 +6,8 @@ const statsEl = document.getElementById('stats');
 const addressInput = document.getElementById('address-input');
 const demandInput = document.getElementById('demand-input');
 const analyzeBtn = document.getElementById('analyze-btn');
+const hasEvInput = document.getElementById('has-ev-input');
+const nnPanel   = document.getElementById('nn-panel');
 const mapContainer = document.getElementById('map-container');
 
 // ── Leaflet Map ──
@@ -215,6 +217,22 @@ function displayResults(data, address, demandKwh) {
 
     statusEl.innerText = `✅ ${address}`;
 
+    // Nearest neighbour lookup
+    const query = {
+        energy_demand_wh:    String(demandKwh * 1000),
+        energy_price_per_wh: '0.00032',
+        energy_price_increase: '0.03',
+        has_ev:      hasEvInput.checked ? 'True' : 'False',
+        has_solar:   'False',
+        has_storage: 'False',
+        has_wallbox: 'False',
+        country:     'Germany',
+    };
+    loadKNNData().then(cache => {
+        const [nearest] = knnFindNearest(query, cache, 1);
+        displayNNPanel(query, nearest);
+    });
+
     // Roof info
     let segHtml = '';
     sorted.slice(0, 6).forEach((seg, i) => {
@@ -261,3 +279,113 @@ function azimuthToDir(deg) {
 window.addEventListener('resize', () => {
     if (leafletMap) leafletMap.invalidateSize();
 });
+
+// ── KNN Nearest Neighbour ─────────────────────────────────────────────────────
+const KNN_CONTINUOUS = ['energy_demand_wh', 'energy_price_per_wh', 'energy_price_increase'];
+const KNN_BOOLEANS   = ['has_ev', 'has_solar', 'has_storage', 'has_wallbox'];
+const KNN_ORDER_COLS = ['ordered_solar', 'ordered_battery', 'ordered_wallbox', 'ordered_heatpump'];
+
+let knnCache = null;
+
+async function loadKNNData() {
+    if (knnCache) return knnCache;
+
+    const res  = await fetch('data/projects_combined.csv');
+    const text = await res.text();
+    const lines = text.split('\n').filter(l => l.trim());
+    const headers = lines[0].split(',');
+    const allRows = lines.slice(1).map(l => {
+        const vals = l.split(',');
+        return Object.fromEntries(headers.map((h, i) => [h, vals[i] ?? '']));
+    });
+
+    // Only rows with at least one purchase
+    const rows = allRows.filter(r => KNN_ORDER_COLS.some(c => r[c] === 'True'));
+
+    // Pre-scale medians for imputation
+    const medians = KNN_CONTINUOUS.map(col => {
+        const vals = rows.map(r => parseFloat(r[col])).filter(v => !isNaN(v)).sort((a, b) => a - b);
+        return vals[Math.floor(vals.length / 2)];
+    });
+
+    function encode(r) {
+        return [
+            ...KNN_CONTINUOUS.map((c, i) => { const v = parseFloat(r[c]); return isNaN(v) ? medians[i] : v; }),
+            ...KNN_BOOLEANS.map(c => r[c] === 'True' ? 1.0 : 0.0),
+            r['country'] === 'Germany' ? 1.0 : 0.0,
+        ];
+    }
+
+    const matrix = rows.map(encode);
+    const nCont  = KNN_CONTINUOUS.length;
+
+    // Fit StandardScaler on continuous columns
+    const means = KNN_CONTINUOUS.map((_, i) => matrix.reduce((s, r) => s + r[i], 0) / matrix.length);
+    const stds  = KNN_CONTINUOUS.map((_, i) => {
+        const v = matrix.reduce((s, r) => s + (r[i] - means[i]) ** 2, 0) / matrix.length;
+        return Math.sqrt(v) || 1;
+    });
+
+    const scaled = matrix.map(r => r.map((v, i) => i < nCont ? (v - means[i]) / stds[i] : v));
+
+    knnCache = { rows, scaled, medians, means, stds, encode, nCont };
+    return knnCache;
+}
+
+function knnFindNearest(query, cache, k = 1) {
+    const { rows, scaled, means, stds, encode, nCont } = cache;
+    const raw  = encode(query);
+    const qVec = raw.map((v, i) => i < nCont ? (v - means[i]) / stds[i] : v);
+    return rows
+        .map((row, idx) => ({ dist: Math.sqrt(scaled[idx].reduce((s, v, i) => s + (v - qVec[i]) ** 2, 0)), row }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, k);
+}
+
+function displayNNPanel(query, nearest) {
+    const { dist, row } = nearest;
+    const kwh  = v => v ? `${(parseFloat(v) / 1000).toFixed(0)} kWh` : '—';
+    const price = v => v ? `${(parseFloat(v) * 1000).toFixed(2)} €/kWh` : '—';
+    const bool  = v => v === 'True'
+        ? '<span style="color:#4ade80">Yes</span>'
+        : '<span style="color:#555">No</span>';
+
+    const ordered = [];
+    if (row.ordered_solar   === 'True') {
+        const panels = row.primary_module_count || '?';
+        const kwp    = row.primary_module_count ? (parseFloat(row.primary_module_count) * 0.475).toFixed(1) + ' kWp' : '';
+        ordered.push(`☀️ Solar: ${panels} panels${kwp ? ' · ' + kwp : ''}`);
+    }
+    if (row.ordered_battery === 'True') ordered.push(`🔋 Battery: ${row.primary_battery_kwh || '?'} kWh`);
+    if (row.ordered_wallbox === 'True') ordered.push(`🔌 Wallbox: ${row.primary_wallbox_kw || '?'} kW`);
+    if (row.ordered_heatpump=== 'True') ordered.push(`♨️ Heat pump`);
+
+    const similarity = Math.max(0, 1 - dist / 3);
+
+    nnPanel.innerHTML = `
+        <p style="font-size:0.8rem;color:#aaa;margin-bottom:6px">
+            Most similar historical project
+            <span style="float:right;color:#4ade80;font-size:0.72rem">match ${(similarity * 100).toFixed(0)}%</span>
+        </p>
+        <div class="nn-grid">
+            <div></div>
+            <div class="nn-col-head">Your house</div>
+            <div class="nn-col-head">Match</div>
+            <div class="nn-label">Demand</div>
+            <div class="nn-val">${kwh(query.energy_demand_wh)}</div>
+            <div class="nn-val match">${kwh(row.energy_demand_wh)}</div>
+            <div class="nn-label">Price</div>
+            <div class="nn-val">${price(query.energy_price_per_wh)}</div>
+            <div class="nn-val match">${price(row.energy_price_per_wh)}</div>
+            <div class="nn-label">EV</div>
+            <div class="nn-val">${bool(query.has_ev)}</div>
+            <div class="nn-val match">${bool(row.has_ev)}</div>
+            <div class="nn-label">Existing solar</div>
+            <div class="nn-val">${bool(query.has_solar)}</div>
+            <div class="nn-val match">${bool(row.has_solar)}</div>
+        </div>
+        <p style="font-size:0.72rem;color:#555;text-transform:uppercase;letter-spacing:0.04em;margin:8px 0 4px">They subsequently ordered:</p>
+        ${ordered.map(s => `<div class="segment">${s}</div>`).join('')}
+    `;
+    nnPanel.style.display = 'block';
+}

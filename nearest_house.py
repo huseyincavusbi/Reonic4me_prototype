@@ -6,8 +6,11 @@ from sklearn.neighbors import NearestNeighbors
 CSV = 'data/projects_combined.csv'
 
 # ── Load ──────────────────────────────────────────────────────────────────────
+ORDER_COLS = ['ordered_solar', 'ordered_battery', 'ordered_wallbox', 'ordered_heatpump']
+
 with open(CSV) as f:
-    rows = list(csv.DictReader(f))
+    rows = [r for r in csv.DictReader(f)
+            if any(r[c] == 'True' for c in ORDER_COLS)]
 
 # ── Features ──────────────────────────────────────────────────────────────────
 # Continuous: standardized so large-valued fields don't dominate
