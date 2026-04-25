@@ -73,13 +73,6 @@ async function analyze() {
         if (solar.error) solar = await fetchSolar(lat, lon, 'MEDIUM');
         if (solar.error) { statusEl.innerText = 'No solar data for this location'; analyzeBtn.disabled = false; return; }
 
-        // Data layers for roof mask
-        const layersRes = await fetch(
-            `https://solar.googleapis.com/v1/dataLayers:get?location.latitude=${lat}&location.longitude=${lon}&radiusMeters=25&view=FULL_LAYERS&requiredQuality=HIGH&pixelSizeMeters=0.25&key=${API_KEY}`
-        );
-        const layers = await layersRes.json();
-        if (layers.maskUrl) await loadRoofOverlay(layers.maskUrl);
-
         displayResults(solar, address, demandKwh);
     } catch (err) {
         console.error(err);
