@@ -1,123 +1,86 @@
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-
 const API_KEY = window.__API_KEY__;
 
 // ── DOM ──
 const statusEl = document.getElementById('status');
 const statsEl = document.getElementById('stats');
 const addressInput = document.getElementById('address-input');
+const demandInput = document.getElementById('demand-input');
 const analyzeBtn = document.getElementById('analyze-btn');
-const modelSelect = document.getElementById('model-select');
-const loadBtn = document.getElementById('load-btn');
 const mapContainer = document.getElementById('map-container');
-const canvasContainer = document.getElementById('canvas-container');
-
-// ── Mode switching ──
-document.getElementById('tab-address').addEventListener('click', () => switchMode('address'));
-document.getElementById('tab-glb').addEventListener('click', () => switchMode('glb'));
-
-function switchMode(mode) {
-    document.getElementById('tab-address').classList.toggle('active', mode === 'address');
-    document.getElementById('tab-glb').classList.toggle('active', mode === 'glb');
-    document.getElementById('address-section').classList.toggle('active', mode === 'address');
-    document.getElementById('glb-section').classList.toggle('active', mode === 'glb');
-    mapContainer.classList.toggle('active', mode === 'address');
-    canvasContainer.classList.toggle('active', mode === 'glb');
-    if (mode === 'glb') initThree();
-    if (mode === 'address' && leafletMap) leafletMap.invalidateSize();
-}
 
 // ── Leaflet Map ──
 let leafletMap = null;
 let mapLayers = [];
 
-function initLeafletMap(lat, lon) {
+function initMap(lat, lon) {
     if (!leafletMap) {
         leafletMap = L.map('map-container').setView([lat, lon], 19);
-        // ESRI satellite tiles (free)
         L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            maxZoom: 21,
-            attribution: 'Tiles © Esri'
+            maxZoom: 21, attribution: 'Tiles © Esri'
         }).addTo(leafletMap);
     } else {
         leafletMap.setView([lat, lon], 19);
     }
-    // Clear old layers
     mapLayers.forEach(l => leafletMap.removeLayer(l));
     mapLayers = [];
-
-    // Add marker
     const marker = L.marker([lat, lon]).addTo(leafletMap);
     mapLayers.push(marker);
 }
 
-// ── Load roof mask GeoTIFF — shows only actual roof surfaces ──
+// ── Roof mask overlay ──
 async function loadRoofOverlay(url) {
     try {
-        statusEl.innerText = 'Loading roof overlay...';
         const res = await fetch(url + `&key=${API_KEY}`);
         const arrayBuffer = await res.arrayBuffer();
         const georaster = await parseGeoraster(arrayBuffer);
-
         const layer = new GeoRasterLayer({
-            georaster,
-            opacity: 0.45,
-            resolution: 512,
+            georaster, opacity: 0.45, resolution: 512,
             pixelValuesToColorFn: (vals) => {
-                const v = vals[0];
-                if (!v || v === 0) return null; // not a roof pixel
-                return 'rgba(74,222,128,0.7)';  // green = roof
+                if (!vals[0] || vals[0] === 0) return null;
+                return 'rgba(74,222,128,0.7)';
             }
         });
         layer.addTo(leafletMap);
         mapLayers.push(layer);
-    } catch (e) {
-        console.warn('Could not load roof overlay:', e);
-    }
+    } catch (e) { console.warn('Could not load roof overlay:', e); }
 }
 
-// ── Address analysis ──
-analyzeBtn.addEventListener('click', analyzeAddress);
-addressInput.addEventListener('keydown', e => { if (e.key === 'Enter') analyzeAddress(); });
+// ── Analyze ──
+analyzeBtn.addEventListener('click', analyze);
+addressInput.addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
 
-async function analyzeAddress() {
+async function analyze() {
     const address = addressInput.value.trim();
+    const demandKwh = parseFloat(demandInput.value) || 4500;
     if (!address) return;
     statusEl.innerText = 'Geocoding...';
     statsEl.innerHTML = '';
     analyzeBtn.disabled = true;
 
     try {
-        // Geocode with Nominatim
+        // Geocode
         const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`);
         const geoData = await geoRes.json();
         if (!geoData.length) { statusEl.innerText = 'Address not found'; analyzeBtn.disabled = false; return; }
-
         const lat = parseFloat(geoData[0].lat);
         const lon = parseFloat(geoData[0].lon);
 
-        // Init map
-        initLeafletMap(lat, lon);
-
-        // Solar API - building insights
+        initMap(lat, lon);
         statusEl.innerText = 'Fetching solar data...';
+
+        // Solar API
         let solar = await fetchSolar(lat, lon, 'HIGH');
         if (solar.error) solar = await fetchSolar(lat, lon, 'MEDIUM');
         if (solar.error) { statusEl.innerText = 'No solar data for this location'; analyzeBtn.disabled = false; return; }
 
-        // Solar API - data layers (for heatmap + mask)
+        // Data layers for roof mask
         const layersRes = await fetch(
-            `https://solar.googleapis.com/v1/dataLayers:get?location.latitude=${lat}&location.longitude=${lon}&radiusMeters=50&view=FULL_LAYERS&requiredQuality=HIGH&pixelSizeMeters=0.5&key=${API_KEY}`
+            `https://solar.googleapis.com/v1/dataLayers:get?location.latitude=${lat}&location.longitude=${lon}&radiusMeters=25&view=FULL_LAYERS&requiredQuality=HIGH&pixelSizeMeters=0.25&key=${API_KEY}`
         );
         const layers = await layersRes.json();
-
-        // Load roof mask overlay — only shows actual roof pixels
         if (layers.maskUrl) await loadRoofOverlay(layers.maskUrl);
 
-        displaySolarResults(solar, address);
+        displayResults(solar, address, demandKwh);
     } catch (err) {
         console.error(err);
         statusEl.innerText = `Error: ${err.message}`;
@@ -132,7 +95,55 @@ async function fetchSolar(lat, lon, quality) {
     return res.json();
 }
 
-function displaySolarResults(data, address) {
+// ── Recommendation engine (based on Reonic CSV data patterns) ──
+function recommendSystem(demandKwh, maxPanels, maxArea, sunshine) {
+    // From real Reonic data analysis:
+    // - Typical panel: 450-475W, ~1.7m²
+    // - Installers size systems to cover 80-120% of annual demand
+    // - Annual yield per kWp in Germany: ~900-1050 kWh (sunshine * 0.8 perf ratio)
+    const PANEL_WP = 475;
+    const PERF_RATIO = 0.8;
+    const yieldPerKwp = sunshine * PERF_RATIO; // kWh per kWp per year
+
+    // How many kWp needed to cover demand?
+    const targetKwp = demandKwh / yieldPerKwp;
+    const targetPanels = Math.ceil(targetKwp / (PANEL_WP / 1000));
+
+    // Clamp to what the roof can fit
+    const recPanels = Math.min(targetPanels, maxPanels);
+    const recKwp = (recPanels * PANEL_WP) / 1000;
+    const recProduction = recKwp * yieldPerKwp;
+
+    // Battery recommendation from Reonic data:
+    // Most projects pair ~1 kWh battery per 1 kWp solar
+    // Common sizes: 5, 9.6, 10, 15 kWh
+    const rawBattery = recKwp * 1.0;
+    const batteryKwh = rawBattery <= 6 ? 5 : rawBattery <= 12 ? 10 : 15;
+
+    // Inverter: sized to ~80-100% of panel kWp
+    // Common sizes from data: 5, 8, 10, 15 kW
+    const rawInverter = recKwp * 0.9;
+    const inverterKw = rawInverter <= 6 ? 5 : rawInverter <= 9 ? 8 : rawInverter <= 12 ? 10 : 15;
+
+    return { recPanels, recKwp, recProduction, batteryKwh, inverterKw, targetPanels, maxPanels };
+}
+
+function generateOffer(rec) {
+    // Based on real Reonic project component patterns
+    return [
+        { type: 'Module', name: `Solar Panel 475W`, brand: 'Sunpro', qty: rec.recPanels, unit: 'pcs' },
+        { type: 'Inverter', name: `Hybrid Inverter ${rec.inverterKw}kW`, brand: 'Sigenergy', qty: 1, unit: 'pcs' },
+        { type: 'BatteryStorage', name: `Battery ${rec.batteryKwh}kWh`, brand: 'Sigenergy', qty: 1, unit: 'pcs' },
+        { type: 'Mounting', name: 'Roof Mounting System', brand: 'SL Rack', qty: rec.recPanels, unit: 'pcs' },
+        { type: 'InstallationFee', name: 'Installation Solar + Storage', brand: '', qty: 1, unit: '' },
+        { type: 'ServiceFee', name: 'Grid Registration', brand: '', qty: 1, unit: '' },
+        { type: 'ServiceFee', name: 'System Planning & Design', brand: '', qty: 1, unit: '' },
+        { type: 'ServiceFee', name: 'Delivery to Site', brand: '', qty: 1, unit: '' },
+    ];
+}
+
+// ── Display ──
+function displayResults(data, address, demandKwh) {
     const sp = data.solarPotential;
     if (!sp) { statusEl.innerText = 'No solar potential data'; return; }
 
@@ -141,14 +152,14 @@ function displaySolarResults(data, address) {
     const maxPanels = sp.maxArrayPanelsCount || 0;
     const maxArea = sp.maxArrayAreaMeters2 || 0;
     const sunshine = sp.maxSunshineHoursPerYear || 0;
-    const systemKwp = (maxPanels * 475) / 1000;
-    const annualKwh = systemKwp * sunshine * 0.8;
 
-    // Draw only top segments as subtle labels (not circles for every segment)
+    const rec = recommendSystem(demandKwh, maxPanels, maxArea, sunshine);
+    const offer = generateOffer(rec);
+
+    // Map labels for top segments
     const sorted = [...segments].sort((a, b) => b.stats.areaMeters2 - a.stats.areaMeters2);
-    const topSegments = sorted.slice(0, 4);
     const colors = ['#4ade80', '#facc15', '#60a5fa', '#f97316'];
-    topSegments.forEach((seg, i) => {
+    sorted.slice(0, 4).forEach((seg, i) => {
         if (seg.center) {
             const label = L.marker([seg.center.latitude, seg.center.longitude], {
                 icon: L.divIcon({
@@ -164,6 +175,7 @@ function displaySolarResults(data, address) {
 
     statusEl.innerText = `✅ ${address}`;
 
+    // Roof info
     let segHtml = '';
     sorted.slice(0, 6).forEach((seg, i) => {
         const dir = azimuthToDir(seg.azimuthDegrees);
@@ -173,13 +185,29 @@ function displaySolarResults(data, address) {
         </div>`;
     });
 
+    // Offer table
+    let offerHtml = offer.map(item =>
+        `<div class="segment">${item.qty}× ${item.name}${item.brand ? ` <span style="color:#888">(${item.brand})</span>` : ''}</div>`
+    ).join('');
+
+    const selfConsumption = Math.min(demandKwh, rec.recProduction);
+    const coveragePercent = (rec.recProduction / demandKwh * 100).toFixed(0);
+
     statsEl.innerHTML = `
-        <p><strong>Total roof:</strong> ${totalArea.toFixed(0)} m²</p>
-        <p><strong>Usable for solar:</strong> ${maxArea.toFixed(0)} m²</p>
+        <p><strong>Roof:</strong> ${totalArea.toFixed(0)} m² total · ${maxArea.toFixed(0)} m² usable</p>
         <p><strong>Sunshine:</strong> ${sunshine.toFixed(0)} hrs/year</p>
-        <p class="highlight">⚡ ${maxPanels} panels × 475W = ${systemKwp.toFixed(1)} kWp</p>
-        <p class="highlight">📊 Est. ${(annualKwh/1000).toFixed(1)} MWh/year</p>
-        <p style="margin-top:8px;font-size:0.8rem;color:#aaa">Roof segments:</p>
+        <p><strong>Your demand:</strong> ${demandKwh.toLocaleString()} kWh/year</p>
+
+        <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Recommended system:</p>
+        <p class="highlight">⚡ ${rec.recPanels} panels × 475W = ${rec.recKwp.toFixed(1)} kWp</p>
+        <p class="highlight">🔋 ${rec.batteryKwh} kWh battery</p>
+        <p class="highlight">📊 ${(rec.recProduction/1000).toFixed(1)} MWh/year (${coveragePercent}% of demand)</p>
+        ${rec.targetPanels > rec.maxPanels ? `<p style="color:#f97316;font-size:0.8rem">⚠️ Roof fits ${rec.maxPanels} panels, but ${rec.targetPanels} needed for 100% coverage</p>` : ''}
+
+        <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Offer components:</p>
+        ${offerHtml}
+
+        <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Roof segments:</p>
         ${segHtml}
     `;
 }
@@ -189,64 +217,7 @@ function azimuthToDir(deg) {
     return dirs[Math.round(deg / 45) % 8];
 }
 
-// ── Three.js for GLB ──
-let threeInited = false, scene3d, camera3d, renderer3d, controls3d, currentModel = null;
-const dracoLoader = new DRACOLoader();
-dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
-const gltfLoader = new GLTFLoader();
-gltfLoader.setDRACOLoader(dracoLoader);
-
-function initThree() {
-    if (threeInited) return;
-    threeInited = true;
-    scene3d = new THREE.Scene();
-    scene3d.background = new THREE.Color(0x222222);
-    camera3d = new THREE.PerspectiveCamera(75, canvasContainer.clientWidth / canvasContainer.clientHeight, 0.1, 1000);
-    renderer3d = new THREE.WebGLRenderer({ antialias: true });
-    renderer3d.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
-    renderer3d.setPixelRatio(window.devicePixelRatio);
-    canvasContainer.appendChild(renderer3d.domElement);
-    controls3d = new OrbitControls(camera3d, renderer3d.domElement);
-    controls3d.enableDamping = true;
-    scene3d.add(new THREE.AmbientLight(0xffffff, 0.6));
-    const dl = new THREE.DirectionalLight(0xffffff, 1.5);
-    dl.position.set(50, 100, 50);
-    scene3d.add(dl);
-    (function animate() { requestAnimationFrame(animate); controls3d.update(); renderer3d.render(scene3d, camera3d); })();
-}
-
-loadBtn.addEventListener('click', () => { initThree(); loadGLB(modelSelect.value); });
-
-function loadGLB(name) {
-    if (currentModel) scene3d.remove(currentModel);
-    statsEl.innerHTML = '';
-    statusEl.innerText = `Loading ${name}...`;
-    gltfLoader.load(
-        encodeURI(`Exp 3D-Modells/3D_Modell ${name}.glb`),
-        (gltf) => {
-            const model = gltf.scene;
-            const box = new THREE.Box3().setFromObject(model);
-            const center = box.getCenter(new THREE.Vector3());
-            model.position.sub(center);
-            currentModel = model;
-            scene3d.add(model);
-            const size = box.getSize(new THREE.Vector3());
-            const dist = Math.max(size.x, size.y, size.z) / (2 * Math.tan(camera3d.fov * Math.PI / 360)) * 1.5;
-            camera3d.position.set(0, dist * 0.5, dist);
-            controls3d.target.set(0, 0, 0);
-            controls3d.update();
-            statusEl.innerText = `Loaded ${name}`;
-        },
-        (xhr) => { if (xhr.lengthComputable) statusEl.innerText = `Loading ${name}: ${Math.round(xhr.loaded/xhr.total*100)}%`; },
-        (err) => { console.error(err); statusEl.innerText = 'Error loading model'; }
-    );
-}
-
+// ── Resize ──
 window.addEventListener('resize', () => {
-    if (renderer3d) {
-        camera3d.aspect = canvasContainer.clientWidth / canvasContainer.clientHeight;
-        camera3d.updateProjectionMatrix();
-        renderer3d.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
-    }
     if (leafletMap) leafletMap.invalidateSize();
 });
