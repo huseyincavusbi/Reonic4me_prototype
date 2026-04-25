@@ -136,36 +136,65 @@ async function fetchSolar(lat, lon, quality) {
 }
 
 // ── Recommendation engine (based on Reonic CSV data patterns) ──
-function recommendSystem(demandKwh, maxPanels, maxArea, sunshine) {
-    // From real Reonic data analysis:
-    // - Typical panel: 450-475W, ~1.7m²
-    // - Installers size systems to cover 80-120% of annual demand
-    // - Annual yield per kWp in Germany: ~900-1050 kWh (sunshine * 0.8 perf ratio)
+function recommendSystem(demandKwh, maxPanels, maxArea, sunshine, segments) {
     const PANEL_WP = 475;
+    const PANEL_AREA = 1.96; // m² per panel (from Google's sizing)
     const PERF_RATIO = 0.8;
-    const yieldPerKwp = sunshine * PERF_RATIO; // kWh per kWp per year
+    const yieldPerKwp = sunshine * PERF_RATIO;
 
-    // How many kWp needed to cover demand?
+    // Filter segments: exclude steep (>45°) and north-facing (poor solar)
+    const usableSegments = (segments || []).filter(seg => {
+        if (seg.pitchDegrees > 45) return false; // walls, not roofs
+        const dir = azimuthToDir(seg.azimuthDegrees);
+        if (dir === 'N' && seg.pitchDegrees > 15) return false; // steep north = bad
+        return true;
+    });
+    const usableArea = usableSegments.reduce((sum, s) => sum + s.stats.areaMeters2, 0);
+    const maxUsablePanels = Math.min(maxPanels, Math.floor(usableArea / PANEL_AREA));
+
+    // How many panels needed to cover demand?
     const targetKwp = demandKwh / yieldPerKwp;
     const targetPanels = Math.ceil(targetKwp / (PANEL_WP / 1000));
-
-    // Clamp to what the roof can fit
-    const recPanels = Math.min(targetPanels, maxPanels);
+    const recPanels = Math.min(targetPanels, maxUsablePanels);
     const recKwp = (recPanels * PANEL_WP) / 1000;
     const recProduction = recKwp * yieldPerKwp;
 
-    // Battery recommendation from Reonic data:
-    // Most projects pair ~1 kWh battery per 1 kWp solar
-    // Common sizes: 5, 9.6, 10, 15 kWh
+    // Battery: ~1 kWh per 1 kWp, common sizes from Reonic data
     const rawBattery = recKwp * 1.0;
     const batteryKwh = rawBattery <= 6 ? 5 : rawBattery <= 12 ? 10 : 15;
 
-    // Inverter: sized to ~80-100% of panel kWp
-    // Common sizes from data: 5, 8, 10, 15 kW
+    // Inverter: ~90% of panel kWp, common sizes from Reonic data
     const rawInverter = recKwp * 0.9;
     const inverterKw = rawInverter <= 6 ? 5 : rawInverter <= 9 ? 8 : rawInverter <= 12 ? 10 : 15;
 
-    return { recPanels, recKwp, recProduction, batteryKwh, inverterKw, targetPanels, maxPanels };
+    // ROI calculation
+    const ELECTRICITY_PRICE = 0.35; // €/kWh (German avg)
+    const PRICE_INCREASE = 0.03;    // 3% annual increase
+    const SYSTEM_COST_PER_KWP = 1400; // € per kWp installed (German avg 2024-2025)
+    const BATTERY_COST_PER_KWH = 800;
+    const FEEDIN_TARIFF = 0.08;     // €/kWh feed-in (Germany 2024)
+    const SELF_CONSUMPTION_RATIO = batteryKwh > 0 ? 0.65 : 0.35; // with/without battery
+
+    const systemCost = recKwp * SYSTEM_COST_PER_KWP + batteryKwh * BATTERY_COST_PER_KWH;
+    const selfConsumed = recProduction * SELF_CONSUMPTION_RATIO;
+    const exported = recProduction - selfConsumed;
+    const annualSavings = selfConsumed * ELECTRICITY_PRICE + exported * FEEDIN_TARIFF;
+    const paybackYears = systemCost / annualSavings;
+
+    // 20-year savings with electricity price increase
+    let totalSavings20y = 0;
+    for (let y = 0; y < 20; y++) {
+        const price = ELECTRICITY_PRICE * Math.pow(1 + PRICE_INCREASE, y);
+        totalSavings20y += selfConsumed * price + exported * FEEDIN_TARIFF;
+    }
+    const roi20y = totalSavings20y - systemCost;
+
+    return {
+        recPanels, recKwp, recProduction, batteryKwh, inverterKw,
+        targetPanels, maxPanels, maxUsablePanels, usableArea,
+        systemCost, annualSavings, paybackYears, roi20y, totalSavings20y,
+        selfConsumed, exported, usableSegments
+    };
 }
 
 function generateOffer(rec) {
@@ -193,7 +222,7 @@ function displayResults(data, address, demandKwh) {
     const maxArea = sp.maxArrayAreaMeters2 || 0;
     const sunshine = sp.maxSunshineHoursPerYear || 0;
 
-    const rec = recommendSystem(demandKwh, maxPanels, maxArea, sunshine);
+    const rec = recommendSystem(demandKwh, maxPanels, maxArea, sunshine, segments);
     const offer = generateOffer(rec);
 
     // Map labels for top segments
@@ -215,13 +244,14 @@ function displayResults(data, address, demandKwh) {
 
     statusEl.innerText = `✅ ${address}`;
 
-    // Roof info
+    // Roof info — mark unusable segments
     let segHtml = '';
     sorted.slice(0, 6).forEach((seg, i) => {
         const dir = azimuthToDir(seg.azimuthDegrees);
         const color = colors[i % colors.length] || '#888';
-        segHtml += `<div class="segment" style="border-left:3px solid ${color}">
-            #${i+1}: ${seg.stats.areaMeters2.toFixed(0)} m² · ${dir} · ${seg.pitchDegrees.toFixed(0)}° tilt
+        const unusable = seg.pitchDegrees > 45 || (dir === 'N' && seg.pitchDegrees > 15);
+        segHtml += `<div class="segment" style="border-left:3px solid ${unusable ? '#666' : color};${unusable ? 'opacity:0.5;' : ''}">
+            #${i+1}: ${seg.stats.areaMeters2.toFixed(0)} m² · ${dir} · ${seg.pitchDegrees.toFixed(0)}° tilt${unusable ? ' ⛔' : ' ✓'}
         </div>`;
     });
 
@@ -230,24 +260,29 @@ function displayResults(data, address, demandKwh) {
         `<div class="segment">${item.qty}× ${item.name}${item.brand ? ` <span style="color:#888">(${item.brand})</span>` : ''}</div>`
     ).join('');
 
-    const selfConsumption = Math.min(demandKwh, rec.recProduction);
     const coveragePercent = (rec.recProduction / demandKwh * 100).toFixed(0);
 
     statsEl.innerHTML = `
-        <p><strong>Roof:</strong> ${totalArea.toFixed(0)} m² total · ${maxArea.toFixed(0)} m² usable</p>
+        <p><strong>Roof:</strong> ${totalArea.toFixed(0)} m² total · ${rec.usableArea.toFixed(0)} m² usable for solar</p>
         <p><strong>Sunshine:</strong> ${sunshine.toFixed(0)} hrs/year</p>
         <p><strong>Your demand:</strong> ${demandKwh.toLocaleString()} kWh/year</p>
 
         <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Recommended system:</p>
         <p class="highlight">⚡ ${rec.recPanels} panels × 475W = ${rec.recKwp.toFixed(1)} kWp</p>
-        <p class="highlight">🔋 ${rec.batteryKwh} kWh battery</p>
+        <p class="highlight">🔋 ${rec.batteryKwh} kWh battery · ${rec.inverterKw} kW inverter</p>
         <p class="highlight">📊 ${(rec.recProduction/1000).toFixed(1)} MWh/year (${coveragePercent}% of demand)</p>
-        ${rec.targetPanels > rec.maxPanels ? `<p style="color:#f97316;font-size:0.8rem">⚠️ Roof fits ${rec.maxPanels} panels, but ${rec.targetPanels} needed for 100% coverage</p>` : ''}
+        ${rec.targetPanels > rec.maxUsablePanels ? `<p style="color:#f97316;font-size:0.8rem">⚠️ Usable roof fits ${rec.maxUsablePanels} panels, but ${rec.targetPanels} needed for 100%</p>` : ''}
+
+        <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Financial estimate:</p>
+        <p>💰 System cost: ~€${(rec.systemCost/1000).toFixed(1)}k</p>
+        <p>💵 Annual savings: ~€${rec.annualSavings.toFixed(0)}/year</p>
+        <p class="highlight">📅 Payback: ~${rec.paybackYears.toFixed(1)} years</p>
+        <p class="highlight">🏦 20-year profit: ~€${(rec.roi20y/1000).toFixed(1)}k</p>
 
         <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Offer components:</p>
         ${offerHtml}
 
-        <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Roof segments:</p>
+        <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Roof segments: (⛔ = too steep/north)</p>
         ${segHtml}
     `;
 }
