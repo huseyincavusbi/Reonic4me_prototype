@@ -45,9 +45,56 @@ async function loadRoofOverlay(url) {
     } catch (e) { console.warn('Could not load roof overlay:', e); }
 }
 
+const suggestionsEl = document.getElementById('suggestions');
+
+// ── Address autocomplete ──
+let debounceTimer = null;
+addressInput.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = addressInput.value.trim();
+    if (q.length < 3) { suggestionsEl.style.display = 'none'; return; }
+    debounceTimer = setTimeout(() => fetchSuggestions(q), 300);
+});
+
+addressInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { suggestionsEl.style.display = 'none'; analyze(); }
+});
+
+async function fetchSuggestions(query) {
+    try {
+        // Bias towards Germany/Berlin for better results
+        const res = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&countrycodes=de&addressdetails=1`
+        );
+        const results = await res.json();
+        if (!results.length) { suggestionsEl.style.display = 'none'; return; }
+
+        suggestionsEl.innerHTML = results.map(r =>
+            `<div class="suggestion" data-lat="${r.lat}" data-lon="${r.lon}" data-name="${r.display_name}">
+                ${r.display_name.split(',').slice(0, 3).join(', ')}
+                <br><small>${r.type} · ${r.display_name.split(',').slice(-2).join(',').trim()}</small>
+            </div>`
+        ).join('');
+        suggestionsEl.style.display = 'block';
+
+        suggestionsEl.querySelectorAll('.suggestion').forEach(el => {
+            el.addEventListener('click', () => {
+                addressInput.value = el.dataset.name.split(',').slice(0, 3).join(', ');
+                suggestionsEl.style.display = 'none';
+                analyze();
+            });
+        });
+    } catch (e) { console.warn('Suggestion error:', e); }
+}
+
+// Hide suggestions on click outside
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('#address-input') && !e.target.closest('#suggestions'))
+        suggestionsEl.style.display = 'none';
+});
+
 // ── Analyze ──
 analyzeBtn.addEventListener('click', analyze);
-addressInput.addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
 
 async function analyze() {
     const address = addressInput.value.trim();
