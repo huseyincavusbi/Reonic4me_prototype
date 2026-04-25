@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reonic AI Roof Analyzer</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; background: #1a1a1a; font-family: sans-serif; color: white; height: 100vh; overflow: hidden; }
+        #app { display: flex; height: 100vh; }
+        #sidebar {
+            width: 320px; min-width: 320px; padding: 15px;
+            background: #111; overflow-y: auto; border-right: 1px solid #333;
+        }
+        h1 { margin: 0 0 12px; font-size: 1.2rem; color: #4ade80; }
+        .mode-tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+        .mode-tabs button { flex: 1; padding: 8px; border: 1px solid #555; border-radius: 4px; background: #333; color: #ccc; cursor: pointer; font-size: 0.8rem; }
+        .mode-tabs button.active { background: #4ade80; color: black; font-weight: bold; }
+        input, select { width: 100%; padding: 8px; margin: 4px 0; border-radius: 4px; border: 1px solid #555; background: #222; color: white; font-size: 0.85rem; }
+        button.action { width: 100%; padding: 10px; margin: 6px 0; border-radius: 4px; border: none; background: #4ade80; color: black; font-weight: bold; cursor: pointer; font-size: 0.9rem; }
+        button.action:hover { background: #22c55e; }
+        #status { margin: 8px 0; font-size: 0.85rem; color: #aaa; }
+        #stats p { margin: 4px 0; font-size: 0.85rem; }
+        .segment { background: rgba(74,222,128,0.1); padding: 6px 8px; border-radius: 4px; margin: 3px 0; font-size: 0.78rem; }
+        .highlight { color: #4ade80; font-weight: bold; }
+        #address-section, #glb-section { display: none; }
+        #address-section.active, #glb-section.active { display: block; }
+        #viewer { flex: 1; position: relative; }
+        #map-container { width: 100%; height: 100%; display: none; }
+        #canvas-container { width: 100%; height: 100%; display: none; }
+        #map-container.active, #canvas-container.active { display: block; }
+        .hint { font-size: 0.7rem; color: #666; margin-top: 10px; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="app">
+        <div id="sidebar">
+            <h1>☀️ Reonic Roof Analyzer</h1>
+            <div class="mode-tabs">
+                <button id="tab-address" class="active">📍 Address</button>
+                <button id="tab-glb">🏠 3D Models</button>
+            </div>
+            <div id="address-section" class="active">
+                <input id="address-input" type="text" placeholder="e.g. Friedrichstraße 100, Berlin">
+                <button class="action" id="analyze-btn">Analyze Roof</button>
+            </div>
+            <div id="glb-section">
+                <select id="model-select">
+                    <option value="Hamburg">Hamburg</option>
+                    <option value="North Germany">North Germany</option>
+                    <option value="Ruhr">Ruhr</option>
+                    <option value="Brandenburg">Brandenburg</option>
+                </select>
+                <button class="action" id="load-btn">Load Model</button>
+            </div>
+            <p id="status">Enter an address to analyze its solar potential</p>
+            <div id="stats"></div>
+            <p class="hint">Address mode uses Google Solar API | 3D mode: Rotate/Pan/Zoom</p>
+        </div>
+        <div id="viewer">
+            <div id="map-container" class="active"></div>
+            <div id="canvas-container"></div>
+        </div>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
+    <script src="https://unpkg.com/georaster-layer-for-leaflet@3.10.0/dist/georaster-layer-for-leaflet.min.js"></script>
+    <script>window.__API_KEY__ = '__MAPS_API_KEY__';</script>
+    <script type="module" src="viewer.js"></script>
+</body>
+</html>

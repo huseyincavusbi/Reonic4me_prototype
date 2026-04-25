@@ -1,0 +1,10 @@
+.env
+.DS_Store
+.venv/
+.gemini/
+.entire/
+*.pdf
+Exp 3D-Modells/
+Project Data/
+node_modules/
+/tmp/
