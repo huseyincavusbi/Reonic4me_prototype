@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Reonic AI Roof Analyzer</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Widgets/widgets.css">
     <style>
+        .cesium-viewer-toolbar, .cesium-viewer-bottom { display: none !important; }
+        .cesium-credit-logoContainer { display: none !important; }
         * { box-sizing: border-box; }
         body { margin: 0; background: #1a1a1a; font-family: sans-serif; color: white; height: 100vh; overflow: hidden; }
         #app { display: flex; height: 100vh; }
@@ -23,11 +26,23 @@
         .segment { background: rgba(74,222,128,0.1); padding: 6px 8px; border-radius: 4px; margin: 3px 0; font-size: 0.78rem; }
         .highlight { color: #4ade80; font-weight: bold; }
         #viewer { flex: 1; position: relative; }
-        #map-container { width: 100%; height: 100%; }
+        #map-container, #cesium-container { position: absolute; inset: 0; }
         .hint { font-size: 0.7rem; color: #666; margin-top: 10px; }
         .suggestion { padding: 8px 10px; cursor: pointer; font-size: 0.83rem; border-bottom: 1px solid #333; }
         .suggestion:hover { background: #333; }
         .suggestion small { color: #888; }
+        details[open] summary span { display: inline-block; transform: rotate(90deg); }
+        #view-toggle {
+            position: absolute; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.65); border-radius: 6px;
+            display: flex; overflow: hidden; border: 1px solid #444;
+        }
+        .view-btn {
+            padding: 5px 14px; border: none; background: transparent;
+            color: #aaa; cursor: pointer; font-size: 0.8rem; font-weight: bold;
+        }
+        .view-btn.active { background: #4ade80; color: #000; }
+        .view-btn:not(.active):hover { background: rgba(255,255,255,0.08); }
     </style>
 </head>
 <body>
@@ -47,11 +62,16 @@
         </div>
         <div id="viewer">
             <div id="map-container"></div>
+            <div id="cesium-container" style="display:none"></div>
+            <div id="view-toggle">
+                <button class="view-btn active" id="btn-2d">2D</button>
+                <button class="view-btn" id="btn-3d">3D</button>
+            </div>
         </div>
     </div>
+    <script>window.CESIUM_BASE_URL = 'https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/';</script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
-    <script src="https://unpkg.com/georaster-layer-for-leaflet@3.10.0/dist/georaster-layer-for-leaflet.min.js"></script>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Cesium.js"></script>
     <script>
         fetch('.env').then(r => r.text()).then(text => {
             const match = text.match(/MAPS_API_KEY=(.+)/);
