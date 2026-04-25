@@ -54,57 +54,28 @@ function initLeafletMap(lat, lon) {
     mapLayers.push(marker);
 }
 
-// ── Load Solar flux GeoTIFF as overlay ──
-async function loadFluxOverlay(url) {
+// ── Load roof mask GeoTIFF — shows only actual roof surfaces ──
+async function loadRoofOverlay(url) {
     try {
-        statusEl.innerText = 'Loading solar heatmap...';
+        statusEl.innerText = 'Loading roof overlay...';
         const res = await fetch(url + `&key=${API_KEY}`);
         const arrayBuffer = await res.arrayBuffer();
         const georaster = await parseGeoraster(arrayBuffer);
 
         const layer = new GeoRasterLayer({
             georaster,
-            opacity: 0.6,
-            resolution: 256,
+            opacity: 0.45,
+            resolution: 512,
             pixelValuesToColorFn: (vals) => {
                 const v = vals[0];
-                if (v === 0 || v === null || v === undefined) return null;
-                // Heatmap: low flux = blue, high flux = red/yellow
-                const max = 1200; // typical max sunshine hours
-                const ratio = Math.min(v / max, 1);
-                if (ratio < 0.33) return `rgba(59,130,246,${0.5 + ratio})`;  // blue
-                if (ratio < 0.66) return `rgba(250,204,21,${0.5 + ratio})`;  // yellow
-                return `rgba(239,68,68,${0.5 + ratio})`;                      // red
+                if (!v || v === 0) return null; // not a roof pixel
+                return 'rgba(74,222,128,0.7)';  // green = roof
             }
         });
         layer.addTo(leafletMap);
         mapLayers.push(layer);
     } catch (e) {
-        console.warn('Could not load flux overlay:', e);
-    }
-}
-
-// ── Load roof mask GeoTIFF as overlay ──
-async function loadMaskOverlay(url) {
-    try {
-        const res = await fetch(url + `&key=${API_KEY}`);
-        const arrayBuffer = await res.arrayBuffer();
-        const georaster = await parseGeoraster(arrayBuffer);
-
-        const layer = new GeoRasterLayer({
-            georaster,
-            opacity: 0.5,
-            resolution: 256,
-            pixelValuesToColorFn: (vals) => {
-                const v = vals[0];
-                if (!v || v === 0) return null; // not a roof
-                return 'rgba(74,222,128,0.5)';  // green = roof
-            }
-        });
-        layer.addTo(leafletMap);
-        mapLayers.push(layer);
-    } catch (e) {
-        console.warn('Could not load mask overlay:', e);
+        console.warn('Could not load roof overlay:', e);
     }
 }
 
@@ -143,9 +114,8 @@ async function analyzeAddress() {
         );
         const layers = await layersRes.json();
 
-        // Load overlays
-        if (layers.annualFluxUrl) await loadFluxOverlay(layers.annualFluxUrl);
-        if (layers.maskUrl) await loadMaskOverlay(layers.maskUrl);
+        // Load roof mask overlay — only shows actual roof pixels
+        if (layers.maskUrl) await loadRoofOverlay(layers.maskUrl);
 
         displaySolarResults(solar, address);
     } catch (err) {
@@ -174,28 +144,30 @@ function displaySolarResults(data, address) {
     const systemKwp = (maxPanels * 475) / 1000;
     const annualKwh = systemKwp * sunshine * 0.8;
 
-    // Draw roof segment centers on map
-    const colors = ['#4ade80', '#facc15', '#f97316', '#60a5fa', '#c084fc', '#fb7185'];
-    segments.forEach((seg, i) => {
+    // Draw only top segments as subtle labels (not circles for every segment)
+    const sorted = [...segments].sort((a, b) => b.stats.areaMeters2 - a.stats.areaMeters2);
+    const topSegments = sorted.slice(0, 4);
+    const colors = ['#4ade80', '#facc15', '#60a5fa', '#f97316'];
+    topSegments.forEach((seg, i) => {
         if (seg.center) {
-            const circle = L.circleMarker([seg.center.latitude, seg.center.longitude], {
-                radius: Math.max(4, Math.sqrt(seg.stats.areaMeters2) / 2),
-                color: colors[i % colors.length],
-                fillColor: colors[i % colors.length],
-                fillOpacity: 0.5,
-                weight: 2,
-            }).bindPopup(`Segment ${i+1}: ${seg.stats.areaMeters2.toFixed(0)}m² · ${azimuthToDir(seg.azimuthDegrees)} · ${seg.pitchDegrees.toFixed(0)}°`);
-            circle.addTo(leafletMap);
-            mapLayers.push(circle);
+            const label = L.marker([seg.center.latitude, seg.center.longitude], {
+                icon: L.divIcon({
+                    className: '',
+                    html: `<div style="background:${colors[i]};color:#000;font-size:11px;font-weight:bold;padding:2px 6px;border-radius:4px;white-space:nowrap;">${seg.stats.areaMeters2.toFixed(0)}m² ${azimuthToDir(seg.azimuthDegrees)}</div>`,
+                    iconAnchor: [20, 10],
+                })
+            });
+            label.addTo(leafletMap);
+            mapLayers.push(label);
         }
     });
 
     statusEl.innerText = `✅ ${address}`;
 
     let segHtml = '';
-    segments.forEach((seg, i) => {
+    sorted.slice(0, 6).forEach((seg, i) => {
         const dir = azimuthToDir(seg.azimuthDegrees);
-        const color = colors[i % colors.length];
+        const color = colors[i % colors.length] || '#888';
         segHtml += `<div class="segment" style="border-left:3px solid ${color}">
             #${i+1}: ${seg.stats.areaMeters2.toFixed(0)} m² · ${dir} · ${seg.pitchDegrees.toFixed(0)}° tilt
         </div>`;

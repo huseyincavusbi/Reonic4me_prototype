@@ -74,7 +74,17 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
     <script src="https://unpkg.com/georaster-layer-for-leaflet@3.10.0/dist/georaster-layer-for-leaflet.min.js"></script>
-    <script>window.__API_KEY__ = '__MAPS_API_KEY__';</script>
-    <script type="module" src="viewer.js"></script>
+    <script>
+        // Load API key from .env file
+        fetch('.env').then(r => r.text()).then(text => {
+            const match = text.match(/MAPS_API_KEY=(.+)/);
+            window.__API_KEY__ = match ? match[1].trim() : '';
+            // Load the app after key is ready
+            const s = document.createElement('script');
+            s.type = 'module';
+            s.src = 'viewer.js';
+            document.body.appendChild(s);
+        });
+    </script>
 </body>
 </html>
