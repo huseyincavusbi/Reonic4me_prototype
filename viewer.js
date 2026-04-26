@@ -6,8 +6,9 @@ const statsEl = document.getElementById('stats');
 const addressInput = document.getElementById('address-input');
 const demandInput = document.getElementById('demand-input');
 const analyzeBtn = document.getElementById('analyze-btn');
-const hasEvInput = document.getElementById('has-ev-input');
-const nnPanel   = document.getElementById('nn-panel');
+const hasEvInput   = document.getElementById('has-ev-input');
+const heatingInput = document.getElementById('heating-input');
+const nnPanel      = document.getElementById('nn-panel');
 const mapContainer = document.getElementById('map-container');
 
 // ── Leaflet Map ──
@@ -219,18 +220,19 @@ function displayResults(data, address, demandKwh) {
 
     // Nearest neighbour lookup
     const query = {
-        energy_demand_wh:    String(demandKwh * 1000),
-        energy_price_per_wh: '0.00032',
+        energy_demand_wh:      String(demandKwh * 1000),
+        energy_price_per_wh:   '0.00032',
         energy_price_increase: '0.03',
-        has_ev:      hasEvInput.checked ? 'True' : 'False',
-        has_solar:   'False',
-        has_storage: 'False',
-        has_wallbox: 'False',
-        country:     'Germany',
+        has_ev:                hasEvInput.checked ? 'True' : 'False',
+        has_solar:             'False',
+        has_storage:           'False',
+        has_wallbox:           'False',
+        country:               'Germany',
+        heating_existing_type: heatingInput.value,
     };
     loadKNNData().then(cache => {
-        const [nearest] = knnFindNearest(query, cache, 1);
-        displayNNPanel(query, nearest);
+        const neighbors = knnFindNearest(query, cache, 10);
+        displayNNPanel(query, neighbors);
     });
 
     // Roof info
@@ -280,10 +282,12 @@ window.addEventListener('resize', () => {
     if (leafletMap) leafletMap.invalidateSize();
 });
 
-// ── KNN Nearest Neighbour ─────────────────────────────────────────────────────
-const KNN_CONTINUOUS = ['energy_demand_wh', 'energy_price_per_wh', 'energy_price_increase'];
-const KNN_BOOLEANS   = ['has_ev', 'has_solar', 'has_storage', 'has_wallbox'];
-const KNN_ORDER_COLS = ['ordered_solar', 'ordered_battery', 'ordered_wallbox', 'ordered_heatpump'];
+// ── KNN + Classifier ──────────────────────────────────────────────────────────
+const KNN_CONTINUOUS  = ['energy_demand_wh', 'energy_price_per_wh', 'energy_price_increase'];
+const KNN_BOOLEANS    = ['has_ev', 'has_solar', 'has_storage', 'has_wallbox'];
+const KNN_ORDER_COLS  = ['ordered_solar', 'ordered_battery', 'ordered_wallbox', 'ordered_heatpump'];
+const KNN_ORDER_LABELS = ['Solar', 'Battery', 'Wallbox', 'Heat pump'];
+const FOSSIL_FUELS    = new Set(['Gas', 'Oil', 'OtherNonRenewable']);
 
 let knnCache = null;
 
@@ -299,27 +303,30 @@ async function loadKNNData() {
         return Object.fromEntries(headers.map((h, i) => [h, vals[i] ?? '']));
     });
 
-    // Only rows with at least one purchase
     const rows = allRows.filter(r => KNN_ORDER_COLS.some(c => r[c] === 'True'));
 
-    // Pre-scale medians for imputation
+    // Medians computed before scaling — used to impute missing query values
     const medians = KNN_CONTINUOUS.map(col => {
         const vals = rows.map(r => parseFloat(r[col])).filter(v => !isNaN(v)).sort((a, b) => a - b);
         return vals[Math.floor(vals.length / 2)];
     });
 
     function encode(r) {
+        const ht = r['heating_existing_type'] || '';
         return [
             ...KNN_CONTINUOUS.map((c, i) => { const v = parseFloat(r[c]); return isNaN(v) ? medians[i] : v; }),
             ...KNN_BOOLEANS.map(c => r[c] === 'True' ? 1.0 : 0.0),
             r['country'] === 'Germany' ? 1.0 : 0.0,
+            ht === 'Gas'      ? 1.0 : 0.0,
+            ht === 'Oil'      ? 1.0 : 0.0,
+            ht === 'Heatpump' ? 1.0 : 0.0,
+            ht               ? 1.0 : 0.0,   // known-flag: distinguishes missing from "other"
         ];
     }
 
     const matrix = rows.map(encode);
     const nCont  = KNN_CONTINUOUS.length;
 
-    // Fit StandardScaler on continuous columns
     const means = KNN_CONTINUOUS.map((_, i) => matrix.reduce((s, r) => s + r[i], 0) / matrix.length);
     const stds  = KNN_CONTINUOUS.map((_, i) => {
         const v = matrix.reduce((s, r) => s + (r[i] - means[i]) ** 2, 0) / matrix.length;
@@ -332,60 +339,78 @@ async function loadKNNData() {
     return knnCache;
 }
 
-function knnFindNearest(query, cache, k = 1) {
+function knnFindNearest(query, cache, k = 10) {
     const { rows, scaled, means, stds, encode, nCont } = cache;
     const raw  = encode(query);
     const qVec = raw.map((v, i) => i < nCont ? (v - means[i]) / stds[i] : v);
     return rows
-        .map((row, idx) => ({ dist: Math.sqrt(scaled[idx].reduce((s, v, i) => s + (v - qVec[i]) ** 2, 0)), row }))
+        .map((row, idx) => ({
+            dist: Math.sqrt(scaled[idx].reduce((s, v, i) => s + (v - qVec[i]) ** 2, 0)),
+            row,
+        }))
         .sort((a, b) => a.dist - b.dist)
         .slice(0, k);
 }
 
-function displayNNPanel(query, nearest) {
-    const { dist, row } = nearest;
-    const kwh  = v => v ? `${(parseFloat(v) / 1000).toFixed(0)} kWh` : '—';
-    const price = v => v ? `${(parseFloat(v) * 1000).toFixed(2)} €/kWh` : '—';
-    const bool  = v => v === 'True'
-        ? '<span style="color:#4ade80">Yes</span>'
-        : '<span style="color:#555">No</span>';
-
-    const ordered = [];
-    if (row.ordered_solar   === 'True') {
-        const panels = row.primary_module_count || '?';
-        const kwp    = row.primary_module_count ? (parseFloat(row.primary_module_count) * 0.475).toFixed(1) + ' kWp' : '';
-        ordered.push(`☀️ Solar: ${panels} panels${kwp ? ' · ' + kwp : ''}`);
+function heatpumpRecommendation(heatingType) {
+    if (FOSSIL_FUELS.has(heatingType)) {
+        return { cls: 'yes', symbol: '✅', confidence: 'high confidence',
+            reason: `Current ${heatingType} heating — fossil fuel systems are strong heat pump candidates. 14 of 14 buyers with known heating type in the dataset used fossil fuels.` };
+    } else if (heatingType === 'Heatpump') {
+        return { cls: 'no', symbol: '❌', confidence: 'high confidence',
+            reason: 'Already has a heat pump. No buyers in the dataset added a second unit.' };
+    } else {
+        return { cls: 'ask', symbol: '❓', confidence: 'low confidence',
+            reason: 'Heating type unknown. Ask if Gas or Oil — if so, recommend heat pump.' };
     }
-    if (row.ordered_battery === 'True') ordered.push(`🔋 Battery: ${row.primary_battery_kwh || '?'} kWh`);
-    if (row.ordered_wallbox === 'True') ordered.push(`🔌 Wallbox: ${row.primary_wallbox_kw || '?'} kW`);
-    if (row.ordered_heatpump=== 'True') ordered.push(`♨️ Heat pump`);
+}
 
-    const similarity = Math.max(0, 1 - dist / 3);
+function displayNNPanel(query, neighbors) {
+    const probs = KNN_ORDER_COLS.map((comp, i) => ({
+        label: KNN_ORDER_LABELS[i],
+        prob:  neighbors.filter(n => n.row[comp] === 'True').length / neighbors.length,
+    }));
+
+    const probBars = probs.map(({ label, prob }) => {
+        const pct = Math.round(prob * 100);
+        const color = prob >= 0.7 ? '#4ade80' : prob >= 0.4 ? '#facc15' : '#888';
+        return `<div class="prob-row">
+            <span class="prob-label">${label}</span>
+            <div class="prob-track"><div class="prob-fill" style="width:${pct}%;background:${color}"></div></div>
+            <span class="prob-pct" style="color:${color}">${pct}%</span>
+        </div>`;
+    }).join('');
+
+    const hp   = heatpumpRecommendation(query.heating_existing_type || '');
+    const hpBox = `<div class="hp-box ${hp.cls}">
+        <strong>${hp.symbol} Heat pump — ${hp.confidence}</strong><br>${hp.reason}
+    </div>`;
+
+    const topNeighbors = neighbors.slice(0, 3).map(({ dist, row }) => {
+        const tags = [];
+        if (row.ordered_solar    === 'True') tags.push(`☀️ ${row.primary_module_count || '?'} panels`);
+        if (row.ordered_battery  === 'True') tags.push(`🔋 ${row.primary_battery_kwh || '?'} kWh`);
+        if (row.ordered_wallbox  === 'True') tags.push(`🔌 ${row.primary_wallbox_kw || '?'} kW`);
+        if (row.ordered_heatpump === 'True') tags.push('♨️ heat pump');
+        const demand = row.energy_demand_wh ? `${(parseFloat(row.energy_demand_wh)/1000).toFixed(0)} kWh` : '—';
+        const ht     = row.heating_existing_type || '?';
+        const ev     = row.has_ev === 'True' ? ' · EV' : '';
+        return `<div class="nn-neighbor">
+            <strong>${demand} · ${ht}${ev}</strong><br>${tags.join(' · ') || '—'}
+        </div>`;
+    }).join('');
 
     nnPanel.innerHTML = `
-        <p style="font-size:0.8rem;color:#aaa;margin-bottom:6px">
-            Most similar historical project
-            <span style="float:right;color:#4ade80;font-size:0.72rem">match ${(similarity * 100).toFixed(0)}%</span>
-        </p>
-        <div class="nn-grid">
-            <div></div>
-            <div class="nn-col-head">Your house</div>
-            <div class="nn-col-head">Match</div>
-            <div class="nn-label">Demand</div>
-            <div class="nn-val">${kwh(query.energy_demand_wh)}</div>
-            <div class="nn-val match">${kwh(row.energy_demand_wh)}</div>
-            <div class="nn-label">Price</div>
-            <div class="nn-val">${price(query.energy_price_per_wh)}</div>
-            <div class="nn-val match">${price(row.energy_price_per_wh)}</div>
-            <div class="nn-label">EV</div>
-            <div class="nn-val">${bool(query.has_ev)}</div>
-            <div class="nn-val match">${bool(row.has_ev)}</div>
-            <div class="nn-label">Existing solar</div>
-            <div class="nn-val">${bool(query.has_solar)}</div>
-            <div class="nn-val match">${bool(row.has_solar)}</div>
-        </div>
-        <p style="font-size:0.72rem;color:#555;text-transform:uppercase;letter-spacing:0.04em;margin:8px 0 4px">They subsequently ordered:</p>
-        ${ordered.map(s => `<div class="segment">${s}</div>`).join('')}
+        <p style="font-size:0.8rem;color:#aaa;margin:0 0 8px">Similar households (${neighbors.length} matches)</p>
+
+        <p style="font-size:0.72rem;color:#666;text-transform:uppercase;letter-spacing:0.04em;margin:0 0 5px">Component likelihood</p>
+        ${probBars}
+
+        <p style="font-size:0.72rem;color:#666;text-transform:uppercase;letter-spacing:0.04em;margin:10px 0 4px">Heat pump</p>
+        ${hpBox}
+
+        <p style="font-size:0.72rem;color:#666;text-transform:uppercase;letter-spacing:0.04em;margin:10px 0 4px">Closest projects</p>
+        ${topNeighbors}
     `;
     nnPanel.style.display = 'block';
 }
