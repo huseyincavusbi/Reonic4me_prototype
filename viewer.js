@@ -256,9 +256,11 @@ function displayResults(data, address, demandKwh) {
     });
 
     // Offer table
-    let offerHtml = offer.map(item =>
-        `<div class="segment">${item.qty}× ${item.name}${item.brand ? ` <span style="color:#888">(${item.brand})</span>` : ''}</div>`
-    ).join('');
+    const SERVICE_TYPES = new Set(['InstallationFee', 'ServiceFee']);
+    const itemHtml = item =>
+        `<div class="segment">${item.qty}× ${item.name}${item.brand ? ` <span style="color:#888">(${item.brand})</span>` : ''}</div>`;
+    const componentsHtml = offer.filter(i => !SERVICE_TYPES.has(i.type)).map(itemHtml).join('');
+    const servicesHtml   = offer.filter(i =>  SERVICE_TYPES.has(i.type)).map(itemHtml).join('');
 
     const coveragePercent = (rec.recProduction / demandKwh * 100).toFixed(0);
 
@@ -280,7 +282,13 @@ function displayResults(data, address, demandKwh) {
         <p class="highlight">🏦 20-year profit: ~€${(rec.roi20y/1000).toFixed(1)}k</p>
 
         <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Offer components:</p>
-        ${offerHtml}
+        ${componentsHtml}
+        <details style="margin-top:6px">
+            <summary style="font-size:0.8rem;color:#666;cursor:pointer;list-style:none;padding:4px 0">
+                <span style="color:#555">▶</span> Installation &amp; services
+            </summary>
+            ${servicesHtml}
+        </details>
 
         <p style="margin-top:10px;font-size:0.8rem;color:#aaa">Roof segments: (⛔ = too steep/north)</p>
         ${segHtml}
