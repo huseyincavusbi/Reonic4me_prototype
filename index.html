@@ -51,6 +51,17 @@
         .nn-label { color: #666; align-self: center; }
         .nn-val { color: #ccc; }
         .nn-val.match { color: #4ade80; }
+        .prob-row { display: grid; grid-template-columns: 80px 1fr 36px; align-items: center; gap: 6px; margin: 4px 0; font-size: 0.76rem; }
+        .prob-label { color: #aaa; }
+        .prob-track { background: #2a2a2a; border-radius: 3px; height: 7px; overflow: hidden; }
+        .prob-fill { height: 100%; border-radius: 3px; background: #4ade80; transition: width 0.4s; }
+        .prob-pct { color: #ccc; text-align: right; }
+        .hp-box { margin: 8px 0; padding: 8px 10px; border-radius: 5px; font-size: 0.78rem; line-height: 1.4; }
+        .hp-box.yes { background: rgba(74,222,128,0.1); border-left: 3px solid #4ade80; }
+        .hp-box.no  { background: rgba(100,100,100,0.1); border-left: 3px solid #555; }
+        .hp-box.ask { background: rgba(250,204,21,0.08); border-left: 3px solid #facc15; }
+        .nn-neighbor { background: #1a1a1a; border-radius: 4px; padding: 6px 8px; margin: 3px 0; font-size: 0.74rem; color: #999; }
+        .nn-neighbor strong { color: #ccc; }
     </style>
 </head>
 <body>
@@ -63,6 +74,14 @@
             </div>
             <label>Annual energy demand (kWh)</label>
             <input id="demand-input" type="number" placeholder="e.g. 4500" value="4500">
+            <label>Current heating system</label>
+            <select id="heating-input">
+                <option value="">Unknown</option>
+                <option value="Gas">Gas</option>
+                <option value="Oil">Oil</option>
+                <option value="Heatpump">Heat pump (existing)</option>
+                <option value="OtherNonRenewable">Other (non-renewable)</option>
+            </select>
             <label class="ev-toggle"><input type="checkbox" id="has-ev-input"> Has electric vehicle (EV)</label>
             <button class="action" id="analyze-btn">Analyze Roof & Generate Offer</button>
             <p id="status">Enter an address to analyze its solar potential</p>
