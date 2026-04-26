@@ -6,13 +6,21 @@ const statsEl = document.getElementById('stats');
 const addressInput = document.getElementById('address-input');
 const demandInput = document.getElementById('demand-input');
 const analyzeBtn = document.getElementById('analyze-btn');
+const btn2D = document.getElementById('btn-2d');
+const btn3D = document.getElementById('btn-3d');
 const mapContainer = document.getElementById('map-container');
+const cesiumContainer = document.getElementById('cesium-container');
 
-// ── Leaflet Map ──
+// ── State ──
+let currentLat = null, currentLon = null;
+let is3D = false;
+let lastSegments = null;
+
+// ── Leaflet (2D) ──
 let leafletMap = null;
 let mapLayers = [];
 
-function initMap(lat, lon) {
+function initLeaflet(lat, lon) {
     if (!leafletMap) {
         leafletMap = L.map('map-container').setView([lat, lon], 19);
         L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
@@ -23,32 +31,120 @@ function initMap(lat, lon) {
     }
     mapLayers.forEach(l => leafletMap.removeLayer(l));
     mapLayers = [];
-    const marker = L.marker([lat, lon]).addTo(leafletMap);
-    mapLayers.push(marker);
 }
 
-// ── Roof mask overlay ──
-async function loadRoofOverlay(url) {
-    try {
-        const res = await fetch(url + `&key=${API_KEY}`);
-        const arrayBuffer = await res.arrayBuffer();
-        const georaster = await parseGeoraster(arrayBuffer);
-        const layer = new GeoRasterLayer({
-            georaster, opacity: 0.45, resolution: 512,
-            pixelValuesToColorFn: (vals) => {
-                if (!vals[0] || vals[0] === 0) return null;
-                return 'rgba(74,222,128,0.7)';
-            }
+function addLeafletLabels(segments) {
+    const colors = ['#4ade80', '#facc15', '#60a5fa', '#f97316'];
+    segments.slice(0, 4).forEach((seg, i) => {
+        if (!seg.center) return;
+        const label = L.marker([seg.center.latitude, seg.center.longitude], {
+            icon: L.divIcon({
+                className: '',
+                html: `<div style="background:${colors[i]};color:#000;font-size:11px;font-weight:bold;padding:2px 6px;border-radius:4px;white-space:nowrap;">${seg.stats.areaMeters2.toFixed(0)}m² ${azimuthToDir(seg.azimuthDegrees)}</div>`,
+                iconAnchor: [20, 10],
+            })
         });
-        layer.addTo(leafletMap);
-        mapLayers.push(layer);
-    } catch (e) { console.warn('Could not load roof overlay:', e); }
+        label.addTo(leafletMap);
+        mapLayers.push(label);
+    });
 }
 
-const suggestionsEl = document.getElementById('suggestions');
+// ── Cesium (3D) ──
+let cesiumViewer = null;
+
+function initCesium() {
+    if (cesiumViewer) return;
+    cesiumViewer = new Cesium.Viewer('cesium-container', {
+        imageryProvider: false,
+        baseLayerPicker: false,
+        requestRenderMode: true,
+        animation: false,
+        timeline: false,
+        homeButton: false,
+        sceneModePicker: false,
+        navigationHelpButton: false,
+        geocoder: false,
+        fullscreenButton: false,
+        infoBox: false,
+        selectionIndicator: false,
+    });
+    cesiumViewer.scene.globe.show = false;
+
+    Cesium.Cesium3DTileset.fromUrl(
+        `https://tile.googleapis.com/v1/3dtiles/root.json?key=${API_KEY}`
+    ).then(tileset => {
+        tileset.showCreditsOnScreen = true;
+        cesiumViewer.scene.primitives.add(tileset);
+        if (currentLat !== null) flyTo(currentLat, currentLon);
+        if (lastSegments) addCesiumLabels(lastSegments);
+    }).catch(e => console.error('3D tileset load failed:', e));
+}
+
+function flyTo(lat, lon) {
+    if (!cesiumViewer) return;
+    cesiumViewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(lon, lat, 250),
+        orientation: {
+            heading: Cesium.Math.toRadians(0),
+            pitch: Cesium.Math.toRadians(-45),
+            roll: 0,
+        },
+        duration: 1.5,
+    });
+}
+
+function addCesiumLabels(segments) {
+    if (!cesiumViewer) return;
+    cesiumViewer.entities.removeAll();
+    const colors = [
+        Cesium.Color.fromCssColorString('#4ade80'),
+        Cesium.Color.fromCssColorString('#facc15'),
+        Cesium.Color.fromCssColorString('#60a5fa'),
+        Cesium.Color.fromCssColorString('#f97316'),
+    ];
+    segments.slice(0, 4).forEach((seg, i) => {
+        if (!seg.center) return;
+        cesiumViewer.entities.add({
+            position: Cesium.Cartesian3.fromDegrees(seg.center.longitude, seg.center.latitude, 40),
+            label: {
+                text: `${seg.stats.areaMeters2.toFixed(0)}m² ${azimuthToDir(seg.azimuthDegrees)}`,
+                font: 'bold 13px sans-serif',
+                fillColor: Cesium.Color.BLACK,
+                backgroundColor: colors[i].withAlpha(0.85),
+                showBackground: true,
+                backgroundPadding: new Cesium.Cartesian2(6, 4),
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+        });
+    });
+}
+
+// ── View toggle ──
+btn2D.addEventListener('click', () => {
+    if (!is3D) return;
+    is3D = false;
+    btn2D.classList.add('active');
+    btn3D.classList.remove('active');
+    cesiumContainer.style.display = 'none';
+    mapContainer.style.display = '';
+    if (leafletMap) leafletMap.invalidateSize();
+});
+
+btn3D.addEventListener('click', () => {
+    if (is3D) return;
+    is3D = true;
+    btn3D.classList.add('active');
+    btn2D.classList.remove('active');
+    mapContainer.style.display = 'none';
+    cesiumContainer.style.display = '';
+    initCesium();
+    if (currentLat !== null) flyTo(currentLat, currentLon);
+});
 
 // ── Address autocomplete ──
+const suggestionsEl = document.getElementById('suggestions');
 let debounceTimer = null;
+
 addressInput.addEventListener('input', () => {
     clearTimeout(debounceTimer);
     const q = addressInput.value.trim();
@@ -62,7 +158,6 @@ addressInput.addEventListener('keydown', e => {
 
 async function fetchSuggestions(query) {
     try {
-        // Bias towards Germany/Berlin for better results
         const res = await fetch(
             `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&countrycodes=de&addressdetails=1`
         );
@@ -87,7 +182,6 @@ async function fetchSuggestions(query) {
     } catch (e) { console.warn('Suggestion error:', e); }
 }
 
-// Hide suggestions on click outside
 document.addEventListener('click', (e) => {
     if (!e.target.closest('#address-input') && !e.target.closest('#suggestions'))
         suggestionsEl.style.display = 'none';
@@ -105,17 +199,18 @@ async function analyze() {
     analyzeBtn.disabled = true;
 
     try {
-        // Geocode
         const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`);
         const geoData = await geoRes.json();
         if (!geoData.length) { statusEl.innerText = 'Address not found'; analyzeBtn.disabled = false; return; }
         const lat = parseFloat(geoData[0].lat);
         const lon = parseFloat(geoData[0].lon);
 
-        initMap(lat, lon);
+        currentLat = lat;
+        currentLon = lon;
+        initLeaflet(lat, lon);
+        if (is3D) flyTo(lat, lon);
         statusEl.innerText = 'Fetching solar data...';
 
-        // Solar API
         let solar = await fetchSolar(lat, lon, 'HIGH');
         if (solar.error) solar = await fetchSolar(lat, lon, 'MEDIUM');
         if (solar.error) { statusEl.innerText = 'No solar data for this location'; analyzeBtn.disabled = false; return; }
@@ -198,7 +293,6 @@ function recommendSystem(demandKwh, maxPanels, maxArea, sunshine, segments) {
 }
 
 function generateOffer(rec) {
-    // Based on real Reonic project component patterns
     return [
         { type: 'Module', name: `Solar Panel 475W`, brand: 'Sunpro', qty: rec.recPanels, unit: 'pcs' },
         { type: 'Inverter', name: `Hybrid Inverter ${rec.inverterKw}kW`, brand: 'Sigenergy', qty: 1, unit: 'pcs' },
@@ -223,28 +317,18 @@ function displayResults(data, address, demandKwh) {
     const sunshine = sp.maxSunshineHoursPerYear || 0;
 
     const rec = recommendSystem(demandKwh, maxPanels, maxArea, sunshine, segments);
-    const offer = generateOffer(rec);
-
-    // Map labels for top segments
     const sorted = [...segments].sort((a, b) => b.stats.areaMeters2 - a.stats.areaMeters2);
-    const colors = ['#4ade80', '#facc15', '#60a5fa', '#f97316'];
-    sorted.slice(0, 4).forEach((seg, i) => {
-        if (seg.center) {
-            const label = L.marker([seg.center.latitude, seg.center.longitude], {
-                icon: L.divIcon({
-                    className: '',
-                    html: `<div style="background:${colors[i]};color:#000;font-size:11px;font-weight:bold;padding:2px 6px;border-radius:4px;white-space:nowrap;">${seg.stats.areaMeters2.toFixed(0)}m² ${azimuthToDir(seg.azimuthDegrees)}</div>`,
-                    iconAnchor: [20, 10],
-                })
-            });
-            label.addTo(leafletMap);
-            mapLayers.push(label);
-        }
-    });
+    lastSegments = sorted;
+
+    addLeafletLabels(sorted);
+    addCesiumLabels(sorted);
+
+    const offer = generateOffer(rec);
 
     statusEl.innerText = `✅ ${address}`;
 
     // Roof info — mark unusable segments
+    const colors = ['#4ade80', '#facc15', '#60a5fa', '#f97316'];
     let segHtml = '';
     sorted.slice(0, 6).forEach((seg, i) => {
         const dir = azimuthToDir(seg.azimuthDegrees);
@@ -300,7 +384,6 @@ function azimuthToDir(deg) {
     return dirs[Math.round(deg / 45) % 8];
 }
 
-// ── Resize ──
 window.addEventListener('resize', () => {
-    if (leafletMap) leafletMap.invalidateSize();
+    if (leafletMap && !is3D) leafletMap.invalidateSize();
 });
