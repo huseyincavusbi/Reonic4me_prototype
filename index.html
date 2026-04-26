@@ -43,6 +43,14 @@
         }
         .view-btn.active { background: #4ade80; color: #000; }
         .view-btn:not(.active):hover { background: rgba(255,255,255,0.08); }
+        .ev-toggle { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; font-size: 0.82rem; color: #aaa; }
+        .ev-toggle input { width: auto; margin: 0; accent-color: #4ade80; cursor: pointer; }
+        #nn-panel { display: none; margin-top: 12px; padding-top: 10px; border-top: 1px solid #2a2a2a; }
+        .nn-grid { display: grid; grid-template-columns: auto 1fr 1fr; gap: 4px 8px; font-size: 0.76rem; margin: 6px 0; }
+        .nn-col-head { font-weight: bold; color: #4ade80; font-size: 0.7rem; text-transform: uppercase; padding-bottom: 3px; border-bottom: 1px solid #333; }
+        .nn-label { color: #666; align-self: center; }
+        .nn-val { color: #ccc; }
+        .nn-val.match { color: #4ade80; }
     </style>
 </head>
 <body>
@@ -55,9 +63,11 @@
             </div>
             <label>Annual energy demand (kWh)</label>
             <input id="demand-input" type="number" placeholder="e.g. 4500" value="4500">
+            <label class="ev-toggle"><input type="checkbox" id="has-ev-input"> Has electric vehicle (EV)</label>
             <button class="action" id="analyze-btn">Analyze Roof & Generate Offer</button>
             <p id="status">Enter an address to analyze its solar potential</p>
             <div id="stats"></div>
+            <div id="nn-panel"></div>
             <p class="hint">Powered by Google Solar API + Reonic project data</p>
         </div>
         <div id="viewer">
